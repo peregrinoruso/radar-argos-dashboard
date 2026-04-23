@@ -133,6 +133,12 @@ def sync_alert_to_gist(alert_dict: dict) -> bool:
                 "cliente":     alert_dict.get("cliente", "promerica_cr"),
                 "caso_id":     alert_dict.get("caso_id", "ARGOS-2026-001"),
                 "hit":         alert_dict.get("hit") or {},
+                # Campos de trazabilidad — permiten abrir la fuente desde el dashboard
+                "url":         alert_dict.get("url") or alert_dict.get("url_final") or "",
+                "titular":     alert_dict.get("titular") or alert_dict.get("titulo") or "",
+                "medio":       alert_dict.get("medio") or "",
+                "keywords_match": alert_dict.get("keywords_match") or alert_dict.get("keywords_nuevas") or "",
+                "preview":     alert_dict.get("preview_contenido") or "",
             }
 
             db.setdefault("alerts", [])
