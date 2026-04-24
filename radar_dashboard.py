@@ -335,11 +335,16 @@ COLOR_CRITICIDAD = {
 
 
 def _get_url(a: dict) -> str:
-    """Extrae la URL de una alerta independientemente de su estructura."""
+    """Extrae la URL de una alerta independientemente de su estructura.
+    Normaliza URLs sin protocolo agregando https://.
+    """
     hit = a.get("hit") or {}
-    url = a.get("url") or hit.get("url") or ""
-    if url in ("N/A", "n/a", "—", "-", ""):
+    url = a.get("url") or hit.get("url") or a.get("url_final") or ""
+    if not url or url in ("N/A", "n/a", "—", "-", "null", "None"):
         return ""
+    url = str(url).strip()
+    if url and not url.startswith("http"):
+        url = "https://" + url
     return url
 
 
@@ -589,13 +594,24 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
 
     # Filtros
     st.sidebar.subheader("Filtros")
+
+    # Botón reset — limpia filtros volviendo a estado completo
+    if st.sidebar.button("🔄 Ver todas las alertas", use_container_width=True):
+        st.session_state.pop("hist_criticidad", None)
+        st.session_state.pop("hist_fuente", None)
+        st.rerun()
+
     criticidades_disp = sorted(df["criticidad"].unique().tolist())
     sel_criticidad = st.sidebar.multiselect(
-        "Criticidad", criticidades_disp, default=criticidades_disp
+        "Criticidad", criticidades_disp,
+        default=st.session_state.get("hist_criticidad", criticidades_disp),
+        key="hist_criticidad",
     )
     fuentes_disp = sorted(df["source_type"].unique().tolist())
     sel_fuente = st.sidebar.multiselect(
-        "Fuente", fuentes_disp, default=fuentes_disp
+        "Fuente", fuentes_disp,
+        default=st.session_state.get("hist_fuente", fuentes_disp),
+        key="hist_fuente",
     )
 
     # Filtro de fechas
@@ -617,7 +633,16 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
         mask &= (df["ts_dt"].dt.date >= rango[0]) & (df["ts_dt"].dt.date <= rango[1])
     df_filtrado = df[mask]
 
-    st.caption(f"Mostrando {len(df_filtrado)} de {len(df)} alertas")
+    ocultas = len(df) - len(df_filtrado)
+    if ocultas > 0:
+        st.warning(
+            f"⚠️ Filtros activos — mostrando **{len(df_filtrado)} de {len(df)}** alertas. "
+            f"**{ocultas} alertas ocultas por el filtro.** "
+            f"Hacé clic en **'🔄 Ver todas las alertas'** en el sidebar para resetear.",
+            icon=None,
+        )
+    else:
+        st.caption(f"Mostrando {len(df_filtrado)} de {len(df)} alertas")
 
     # Mostrar alertas como expanders
     for _, row in df_filtrado.iterrows():
