@@ -7,15 +7,17 @@ Dashboard Streamlit de monitoreo de crisis reputacionales.
 Uso:
     streamlit run radar_dashboard.py
 
-Variables de entorno (configurar en Streamlit Cloud → Secrets):
+Variables de entorno opcionales:
     GITHUB_GIST_ID      — ID del Gist con historial de alertas
     GITHUB_GIST_TOKEN   — Token GitHub (lectura)
+    RADAR_ALERTS_DIR    — Ruta a carpeta alerts/ local (fallback)
 """
 
 import sys
 import os
 
 # Asegurar que gist_sync.py sea importable desde cualquier directorio de ejecución
+# (necesario cuando Streamlit Cloud corre desde la raíz del repo)
 _THIS_DIR = os.path.dirname(os.path.abspath(__file__))
 if _THIS_DIR not in sys.path:
     sys.path.insert(0, _THIS_DIR)
@@ -91,11 +93,11 @@ CSS = """
         border-radius: 12px;
         margin: 1rem 0;
     }
-    .semaforo-rojo    { background: #2d0a0a; border: 2px solid #C0392B; }
+    .semaforo-rojo   { background: #2d0a0a; border: 2px solid #C0392B; }
     .semaforo-naranja { background: #2d1a0a; border: 2px solid #F06A1A; }
-    .semaforo-verde   { background: #0a2d0a; border: 2px solid #27AE60; }
-    .semaforo-gris    { background: #1a1a1a; border: 2px solid #555; }
-    .semaforo-icon  { font-size: 3rem; }
+    .semaforo-verde  { background: #0a2d0a; border: 2px solid #27AE60; }
+    .semaforo-gris   { background: #1a1a1a; border: 2px solid #555; }
+    .semaforo-icon { font-size: 3rem; }
     .semaforo-label { font-size: 1.2rem; font-weight: 700; color: #F0F2F5; margin-top: 0.5rem; }
     .semaforo-sub   { font-size: 0.8rem; color: #aaa; }
     .metric-card {
@@ -121,14 +123,20 @@ def _directorio_alertas_local() -> str:
     custom = os.getenv("RADAR_ALERTS_DIR", "")
     if custom and os.path.isdir(custom):
         return custom
+    # Auto-detectar: mismo directorio que este script
     script_dir = Path(__file__).parent
     return str(script_dir / "alerts")
 
 
+# Solo mostrar alertas a partir de esta fecha — evita ruido histórico
+FECHA_LIMITE_DASHBOARD = "2026-04-22"
+
 @st.cache_data(ttl=120)
 def cargar_alertas() -> list[dict]:
-    """Carga alertas del Gist y/o carpeta local. Dedup por timestamp."""
+    """Carga alertas del Gist y/o carpeta local. Dedup por timestamp.
+    Aplica filtro de fecha: solo alertas >= FECHA_LIMITE_DASHBOARD."""
     alertas = []
+    fuentes_ok = []
 
     # 1. Intentar Gist
     try:
@@ -136,6 +144,7 @@ def cargar_alertas() -> list[dict]:
         gist_alerts = cargar_alertas_gist()
         if gist_alerts:
             alertas.extend(gist_alerts)
+            fuentes_ok.append(f"Gist ({len(gist_alerts)} alertas)")
     except Exception:
         pass
 
@@ -144,6 +153,7 @@ def cargar_alertas() -> list[dict]:
     if os.path.isdir(alerts_dir):
         archivos = sorted(glob.glob(f"{alerts_dir}/*.json"))
         ts_en_gist = {a.get("timestamp") for a in alertas}
+        locales = 0
         for archivo in archivos:
             try:
                 with open(archivo, encoding="utf-8") as f:
@@ -155,9 +165,19 @@ def cargar_alertas() -> list[dict]:
                     a.setdefault("score", 0)
                     alertas.append(a)
                     ts_en_gist.add(ts)
+                    locales += 1
             except Exception:
                 pass
+        if locales:
+            fuentes_ok.append(f"Local ({locales} alertas)")
 
+    # Filtro de fecha: solo alertas a partir del 22 de abril de 2026
+    alertas = [
+        a for a in alertas
+        if a.get("timestamp", "")[:10] >= FECHA_LIMITE_DASHBOARD
+    ]
+
+    # Ordenar más reciente primero
     alertas.sort(key=lambda a: a.get("timestamp", ""), reverse=True)
     return alertas
 
@@ -178,6 +198,10 @@ def _inferir_local(alert: dict) -> str:
 
 
 def calcular_semaforo(alertas: list, ventana_horas: int = 6) -> tuple[str, str]:
+    """
+    Devuelve (estado, descripción) basado en alertas recientes.
+    estados: ROJO / NARANJA / VERDE / GRIS
+    """
     if not alertas:
         return "GRIS", "Sin datos"
 
@@ -231,7 +255,7 @@ def alertas_a_df(alertas: list) -> pd.DataFrame:
             "cluster":     a.get("cluster", "—"),
             "score":       a.get("score", 0),
             "mensaje":     a.get("mensaje", ""),
-            "url":         hit.get("url") or a.get("url", ""),
+            "url":         str(hit.get("url") or a.get("url") or "").strip(),
             "titulo":      hit.get("title") or hit.get("titulo", ""),
             "usuario":     hit.get("usuario", ""),
             "retweets":    hit.get("retweets", 0),
@@ -252,21 +276,35 @@ FUENTE_LABELS = {
     "sugef_doc":       "📄 SUGEF Documentos",
     "medios_cr":       "📰 Medios de comunicación",
     "twitter":         "🐦 Twitter / X",
-    "keywords_exa":    "🔍 Búsqueda web profunda",
+    "keywords_exa":    "🔍 Búsqueda web (Exa)",
     "gaceta":          "📋 Gaceta Oficial",
     "conassif":        "🏦 CONASSIF",
+    "linkedin":        "💼 LinkedIn",
+    "reddit":          "🔴 Reddit",
+    "blogs_foros":     "💬 Blogs y foros",
+    "google_news":     "📰 Google News RSS",
+    "facebook":        "📘 Facebook",
+    "tiktok":          "🎵 TikTok",
+    "youtube":         "▶️ YouTube",
     "otros":           "⚪ Sin clasificar",
 }
 
 FUENTE_DESCRIPCIONES = {
     "sugef_sanciones": "Cambios en la página oficial de sanciones de SUGEF. Alta relevancia regulatoria.",
     "sugef_doc":       "Circulares, resoluciones y documentos nuevos publicados por SUGEF.",
-    "medios_cr":       "Artículos en medios costarricenses que mencionan keywords críticas del caso.",
-    "twitter":         "Tweets con menciones relevantes detectados vía Apify.",
-    "keywords_exa":    "Resultados de búsqueda profunda en la web con keywords configuradas.",
-    "gaceta":          "Publicaciones nuevas en La Gaceta Oficial de Costa Rica.",
+    "medios_cr":       "Artículos en medios costarricenses (El Financiero, CRHoy, Semanario, etc.).",
+    "twitter":         "Tweets sobre Promerica/SUGEF con menciones verificadas. Filtro estricto aplicado.",
+    "keywords_exa":    "Búsqueda profunda web via Exa — 7 clusters de keywords (35+ queries).",
+    "gaceta":          "Publicaciones en La Gaceta Oficial de Costa Rica (cubierta via Google News).",
     "conassif":        "Documentos o cambios detectados en el sitio del CONASSIF.",
-    "otros":           "Alertas sin fuente identificada (generadas en las primeras corridas del monitor).",
+    "linkedin":        "Posts y artículos de profesionales en LinkedIn sobre Promerica/SUGEF.",
+    "reddit":          "Menciones en Reddit — foros de finanzas y comunidades CR.",
+    "blogs_foros":     "Blogs financieros, foros de consumidores y sitios de opinión.",
+    "google_news":     "Agregador Google News — captura La Nación, Extra, AP y 50+ fuentes.",
+    "facebook":        "Publicaciones en páginas de medios costarricenses en Facebook.",
+    "tiktok":          "Videos TikTok con menciones de Promerica/SUGEF.",
+    "youtube":         "Videos YouTube sobre la sanción Promerica.",
+    "otros":           "Alertas sin fuente identificada o de fuentes nuevas.",
 }
 
 FUENTE_COLORES = {
@@ -274,9 +312,16 @@ FUENTE_COLORES = {
     "📄 SUGEF Documentos":        "#E8A020",
     "📰 Medios de comunicación":  "#2980B9",
     "🐦 Twitter / X":             "#1DA1F2",
-    "🔍 Búsqueda web profunda":   "#27AE60",
+    "🔍 Búsqueda web (Exa)":      "#27AE60",
     "📋 Gaceta Oficial":          "#8E44AD",
     "🏦 CONASSIF":                "#16A085",
+    "💼 LinkedIn":                "#0077B5",
+    "🔴 Reddit":                  "#FF4500",
+    "💬 Blogs y foros":           "#F39C12",
+    "📰 Google News RSS":         "#4285F4",
+    "📘 Facebook":                "#1877F2",
+    "🎵 TikTok":                  "#010101",
+    "▶️ YouTube":                  "#FF0000",
     "⚪ Sin clasificar":           "#555555",
 }
 
@@ -290,6 +335,7 @@ COLOR_CRITICIDAD = {
 
 
 def _get_url(a: dict) -> str:
+    """Extrae la URL de una alerta independientemente de su estructura."""
     hit = a.get("hit") or {}
     url = a.get("url") or hit.get("url") or ""
     if url in ("N/A", "n/a", "—", "-", ""):
@@ -298,6 +344,7 @@ def _get_url(a: dict) -> str:
 
 
 def _render_alertas_filtradas(alertas_filtradas: list, titulo: str):
+    """Muestra alertas en tarjetas expandibles con toda la información disponible."""
     st.markdown(f"#### {titulo} ({len(alertas_filtradas)} alertas)")
     if not alertas_filtradas:
         st.info("No hay alertas para esta selección.")
@@ -311,16 +358,20 @@ def _render_alertas_filtradas(alertas_filtradas: list, titulo: str):
         url    = _get_url(a)
         fuente = FUENTE_LABELS.get(a.get("source_type", "otros"), a.get("source_type", ""))
 
+        # Título del expander: más corto, con ícono de link si tiene URL
         link_icon = " 🔗" if url else ""
         with st.expander(f"{emoji} `{ts}` — **{crit}** · {msg[:65]}{link_icon}", expanded=False):
 
+            # Botón grande de acceso a la fuente (si hay URL)
             if url:
                 st.link_button("🌐 Abrir fuente original", url, use_container_width=True)
             else:
-                st.caption("⚠️ Esta alerta no tiene URL registrada.")
+                st.caption("⚠️ Esta alerta no tiene URL registrada (generada por cambio de hash o evento interno).")
 
             st.divider()
 
+            # Datos según tipo de alerta
+            # — Sanción SUGEF (tiene entidad, monto, motivo)
             entidad = a.get("entidad", "")
             monto   = a.get("monto_colones", "")
             motivo  = a.get("motivo", "")
@@ -342,6 +393,7 @@ def _render_alertas_filtradas(alertas_filtradas: list, titulo: str):
                     st.warning(f"⚡ **Acción requerida**: {accion}")
                 st.divider()
 
+            # — Artículo de medios (tiene titular, medio, keywords_match)
             titular = a.get("titular", "")
             medio   = a.get("medio", "")
             kw      = a.get("keywords_match", "")
@@ -352,6 +404,7 @@ def _render_alertas_filtradas(alertas_filtradas: list, titulo: str):
                 if kw:      st.markdown(f"**Keyword que lo activó**: `{kw}`")
                 st.divider()
 
+            # — Documento SUGEF (tiene fuente, sha256, archivo)
             sha = a.get("sha256", "")
             fuente_doc = a.get("fuente", "")
             if sha:
@@ -360,14 +413,33 @@ def _render_alertas_filtradas(alertas_filtradas: list, titulo: str):
                 st.caption(f"SHA-256: `{sha[:16]}…`")
                 st.divider()
 
+            # — Twitter hit (soporta formato viejo {hit: {}} y nuevo {usuario: ...})
             hit = a.get("hit") or {}
-            if hit.get("usuario"):
+            usuario_tw = hit.get("usuario") or a.get("usuario", "")
+            texto_tw   = hit.get("text") or hit.get("texto") or a.get("texto", "")
+            rt_tw      = hit.get("retweets", 0) or a.get("retweets", 0)
+            likes_tw   = hit.get("likes", 0) or a.get("likes", 0)
+            seg_tw     = a.get("seguidores", 0)
+            if usuario_tw:
                 st.markdown("##### 🐦 Tweet detectado")
-                st.markdown(f"**@{hit['usuario']}** — RT:{hit.get('retweets',0)} ❤️{hit.get('likes',0)}")
-                if hit.get("text"):
-                    st.text(hit["text"][:300])
+                seg_str = f" · {seg_tw:,} seguidores" if seg_tw else ""
+                st.markdown(f"**{usuario_tw}**{seg_str} — 🔁 {rt_tw} ❤️ {likes_tw}")
+                if texto_tw:
+                    st.text(texto_tw[:300])
                 st.divider()
 
+            # — LinkedIn / blogs / foros
+            titular = a.get("titular", "") or a.get("titulo", "")
+            preview  = a.get("preview", "")
+            source_t = a.get("source_type", "")
+            if source_t in ("linkedin", "reddit", "blogs_foros", "google_news") and not usuario_tw:
+                if titular:
+                    st.markdown(f"##### Titular: *{titular}*")
+                if preview:
+                    st.caption(preview[:300])
+                st.divider()
+
+            # Metadatos generales
             col1, col2, col3 = st.columns(3)
             col1.markdown(f"**Criticidad**: `{crit}`")
             col2.markdown(f"**Fuente**: {fuente}")
@@ -385,6 +457,7 @@ def pagina_overview(alertas: list, df: pd.DataFrame):
     </div>
     """, unsafe_allow_html=True)
 
+    # Semáforo
     estado, desc = calcular_semaforo(alertas, ventana_horas=6)
     col_sem, col_metrics = st.columns([1, 3])
 
@@ -409,8 +482,10 @@ def pagina_overview(alertas: list, df: pd.DataFrame):
         st.info("No hay alertas disponibles. Verificá la configuración en la sección **Config**.")
         return
 
+    # ── Gráfico 1: Alertas por día ──────────────────────────────────────────
     st.subheader("📅 Alertas detectadas por día")
-    st.caption("Cada barra muestra cuántas alertas generó el monitor en ese día, agrupadas por nivel de urgencia.")
+    st.caption("Cada barra muestra cuántas alertas generó el monitor en ese día, agrupadas por nivel de urgencia. "
+               "Hacé clic en una barra para ver qué detectó el sistema ese día.")
 
     if "fecha" in df.columns:
         df_dia = df.groupby(["fecha", "criticidad"]).size().reset_index(name="count")
@@ -432,11 +507,13 @@ def pagina_overview(alertas: list, df: pd.DataFrame):
         )
         sel_bar = st.plotly_chart(fig_bar, use_container_width=True, on_select="rerun", key="chart_bar")
 
+        # Reaccionar al clic en la barra
         if sel_bar and sel_bar.get("selection", {}).get("points"):
             punto = sel_bar["selection"]["points"][0]
             fecha_sel = punto.get("x", "")
+            crit_sel  = punto.get("legendgroup") or punto.get("curveNumber", "")
             if fecha_sel:
-                st.markdown("---")
+                st.markdown(f"---")
                 filtradas = [
                     a for a in alertas
                     if str(a.get("timestamp", "")).startswith(fecha_sel)
@@ -445,8 +522,10 @@ def pagina_overview(alertas: list, df: pd.DataFrame):
 
     st.divider()
 
+    # ── Gráfico 2: Distribución por fuente ──────────────────────────────────
     st.subheader("📡 ¿De dónde vienen las alertas?")
-    st.caption("Muestra qué canales de monitoreo están generando más señales.")
+    st.caption("Muestra qué canales de monitoreo están generando más señales. "
+               "Hacé clic en un segmento para ver exactamente qué encontró el sistema en esa fuente.")
 
     df_fuente = df["source_type"].value_counts().reset_index()
     df_fuente.columns = ["source_type", "count"]
@@ -486,9 +565,11 @@ def pagina_overview(alertas: list, df: pd.DataFrame):
                 st.caption(desc)
                 st.markdown("")
 
+    # Reaccionar al clic en el pie
     if sel_pie and sel_pie.get("selection", {}).get("points"):
         punto      = sel_pie["selection"]["points"][0]
         fuente_sel = punto.get("label", "")
+        # Invertir el label para obtener el source_type
         src_sel = next((k for k, v in FUENTE_LABELS.items() if v == fuente_sel), None)
         if src_sel:
             st.markdown("---")
@@ -506,6 +587,7 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
         st.info("No hay alertas disponibles.")
         return
 
+    # Filtros
     st.sidebar.subheader("Filtros")
     criticidades_disp = sorted(df["criticidad"].unique().tolist())
     sel_criticidad = st.sidebar.multiselect(
@@ -516,6 +598,7 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
         "Fuente", fuentes_disp, default=fuentes_disp
     )
 
+    # Filtro de fechas
     if "ts_dt" in df.columns and df["ts_dt"].notna().any():
         fecha_min = df["ts_dt"].min().date()
         fecha_max = df["ts_dt"].max().date()
@@ -528,6 +611,7 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
     else:
         rango = None
 
+    # Aplicar filtros
     mask = df["criticidad"].isin(sel_criticidad) & df["source_type"].isin(sel_fuente)
     if rango and len(rango) == 2:
         mask &= (df["ts_dt"].dt.date >= rango[0]) & (df["ts_dt"].dt.date <= rango[1])
@@ -535,6 +619,7 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
 
     st.caption(f"Mostrando {len(df_filtrado)} de {len(df)} alertas")
 
+    # Mostrar alertas como expanders
     for _, row in df_filtrado.iterrows():
         crit  = row.get("criticidad", "NORMAL")
         emoji = EMOJIS_CRITICIDAD.get(crit, "•")
@@ -544,20 +629,35 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
         label = f"{emoji} `{ts}` — **{crit}** · {fuente} · {msg}"
 
         with st.expander(label, expanded=False):
+            # Titular / texto del tweet si existe
+            original = next(
+                (a for a in alertas if a.get("timestamp", "") == row.get("timestamp", "")),
+                None
+            )
+            titular_orig = ""
+            if original:
+                titular_orig = (original.get("titular") or original.get("titulo")
+                                or original.get("texto", ""))[:200]
+            if titular_orig:
+                st.markdown(f"*{titular_orig}*")
+
             col1, col2 = st.columns(2)
             with col1:
                 st.markdown(f"**Criticidad**: `{crit}`")
                 st.markdown(f"**Fuente**: `{fuente}`")
                 st.markdown(f"**Cluster**: `{row.get('cluster', '—')}`")
-                st.markdown(f"**Score**: `{row.get('score', 0):.1f}`")
             with col2:
-                url = row.get("url", "")
-                if url:
-                    st.markdown(f"**URL**: [{url[:60]}...]({url})")
-                if row.get("usuario"):
-                    st.markdown(f"**Usuario**: @{row['usuario']} · RT:{row.get('retweets',0)} ❤️{row.get('likes',0)}")
-            st.markdown(f"**Mensaje completo**: {row.get('mensaje', '')}")
+                url = str(row.get("url") or "").strip()
+                if url and url.startswith("http"):
+                    st.link_button("🌐 Abrir fuente", url)
+                if original and original.get("usuario"):
+                    seg = original.get("seguidores", 0)
+                    st.markdown(f"**Twitter**: {original['usuario']}"
+                                + (f" · {seg:,} seg" if seg else "")
+                                + f" · 🔁{original.get('retweets',0)} ❤️{original.get('likes',0)}")
+            st.markdown(f"**Mensaje**: {row.get('mensaje', '')}")
 
+            # Buscar alert original para mostrar JSON
             original = next(
                 (a for a in alertas if a.get("timestamp", "") == row.get("timestamp", "")),
                 None
@@ -583,6 +683,7 @@ def pagina_detalle(alertas: list):
     alerta = alertas[idx]
 
     crit   = alerta.get("criticidad", "NORMAL")
+    color  = COLORES.get(crit, "#555")
     emoji  = EMOJIS_CRITICIDAD.get(crit, "•")
 
     st.markdown(f"### {emoji} {crit}")
@@ -600,8 +701,8 @@ def pagina_detalle(alertas: list):
     st.markdown(f"**Cluster**: `{alerta.get('cluster', '—')}`")
     st.markdown(f"**Caso ID**: `{alerta.get('caso_id', '—')}`")
 
-    url = hit.get("url") or alerta.get("url", "")
-    if url:
+    url = str(hit.get("url") or alerta.get("url") or "").strip()
+    if url and url.startswith("http"):
         st.markdown(f"**URL**: [{url}]({url})")
 
     if hit.get("title"):
@@ -614,6 +715,7 @@ def pagina_detalle(alertas: list):
     if hit.get("usuario"):
         st.markdown(f"**Twitter**: @{hit['usuario']} · 🔁{hit.get('retweets',0)} ❤️{hit.get('likes',0)}")
 
+    # Campos especiales SUGEF
     entidad = hit.get("entidad") or alerta.get("entidad", "")
     monto   = hit.get("monto_colones") or alerta.get("monto_colones", "")
     if entidad or monto:
@@ -632,6 +734,7 @@ def pagina_detalle(alertas: list):
 def pagina_config():
     st.header("⚙️ Configuración")
 
+    # Estado del Gist
     st.subheader("Fuentes de datos")
     col1, col2 = st.columns(2)
 
@@ -662,8 +765,25 @@ def pagina_config():
         if archivos:
             st.success(f"✅ {len(archivos)} archivos en `{alerts_dir}`")
         else:
-            st.warning(f"⚠️ Sin archivos locales")
-            st.caption("Solo el Gist está activo como fuente de datos.")
+            st.warning(f"⚠️ Sin archivos locales en `{alerts_dir}`")
+            st.caption("Podés configurar la ruta con `RADAR_ALERTS_DIR`")
+
+    st.divider()
+
+    st.subheader("Cómo configurar")
+    st.markdown("""
+    **Variables de entorno requeridas (agregar a `.env` o exportar en terminal):**
+    """)
+    st.code("""GITHUB_GIST_ID=<ID del Gist — visible en la URL>
+GITHUB_GIST_TOKEN=<ghp_... — Personal Access Token con permiso gist>
+RADAR_ALERTS_DIR=<ruta a la carpeta alerts/ local>""", language="bash")
+
+    st.markdown("""
+    **Arrancar el dashboard:**
+    ```bash
+    streamlit run radar_dashboard.py
+    ```
+    """)
 
     st.divider()
     st.subheader("Acciones")
