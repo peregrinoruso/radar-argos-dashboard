@@ -647,9 +647,10 @@ def pagina_historial(alertas: list, df: pd.DataFrame):
                 st.markdown(f"**Fuente**: `{fuente}`")
                 st.markdown(f"**Cluster**: `{row.get('cluster', '—')}`")
             with col2:
-                url = str(row.get("url") or "").strip()
+                url = _get_url(original) if original else str(row.get("url") or "").strip()
                 if url and url.startswith("http"):
                     st.link_button("🌐 Abrir fuente", url)
+                    st.caption(f"[{url[:55]}...]({url})" if len(url) > 55 else f"[{url}]({url})")
                 if original and original.get("usuario"):
                     seg = original.get("seguidores", 0)
                     st.markdown(f"**Twitter**: {original['usuario']}"
@@ -701,9 +702,10 @@ def pagina_detalle(alertas: list):
     st.markdown(f"**Cluster**: `{alerta.get('cluster', '—')}`")
     st.markdown(f"**Caso ID**: `{alerta.get('caso_id', '—')}`")
 
-    url = str(hit.get("url") or alerta.get("url") or "").strip()
+    url = _get_url(alerta)
     if url and url.startswith("http"):
-        st.markdown(f"**URL**: [{url}]({url})")
+        st.link_button("🌐 Abrir fuente", url, use_container_width=True)
+        st.caption(f"[{url[:70]}...]({url})" if len(url) > 70 else f"[{url}]({url})")
 
     if hit.get("title"):
         st.markdown(f"**Título**: {hit['title']}")
